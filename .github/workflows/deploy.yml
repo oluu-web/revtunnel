@@ -39,7 +39,7 @@ jobs:
           GOOS=linux GOARCH=amd64 go build -o tunnel-server ./cmd/server
 
       - name: Copy binary to VPS
-        uses: appleboy/scp-action@1.0.0
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
