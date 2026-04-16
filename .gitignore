@@ -32,3 +32,7 @@ go.work.sum
 .vscode/
 
 .DS_Store
+/tmp
+server.crt
+server.key
+/internal/db/migrations
