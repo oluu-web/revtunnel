@@ -22,7 +22,7 @@ jobs:
 
   deploy:
     name: Build % Deploy
-    runs-on: ubuntu-lates
+    runs-on: ubuntu-latest
     needs: test
 
     steps:
