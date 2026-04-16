@@ -2,9 +2,9 @@ name: Deploy to VPS
 
 on:
   push:
-    branches: -main
+    branches: main
 
-jos:
+jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
