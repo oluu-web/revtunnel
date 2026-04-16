@@ -18,7 +18,7 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test ./..
+        run: go test -race -count=1 ./internal/...
 
   deploy:
     name: Build % Deploy
