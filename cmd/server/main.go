@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
+	"github.com/oluu-web/lennut/internal/api"
+	"github.com/oluu-web/lennut/internal/auth"
+	dbpkg "github.com/oluu-web/lennut/internal/db"
 	"github.com/oluu-web/lennut/internal/proto"
 	"github.com/oluu-web/lennut/internal/registry"
 	"github.com/oluu-web/lennut/internal/relay"
@@ -25,9 +29,45 @@ func main() {
 	certFile   := flag.String("cert", "server.crt", "TLS certificate file")
 	keyFile    := flag.String("key", "server.key", "TLS key file")
 	token      := flag.String("token", "secret123", "shared API token")
+	databaseURL := flag.String("database-url", "", "PostgreSQL connection string")
+	tokenSigningSecret := flag.String("token-signing-secret", "", "secret used to sign auth tokens")
 	flag.Parse()
 
+	var db *sql.DB
+	if *databaseURL != "" {
+		var err error
+		db, err = dbpkg.Open(*databaseURL)
+		if err != nil {
+		slog.Error("open database", "err", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	slog.Info("database connected")
+	}
+	_ = db
+
+	issuer, err := auth.NewTokenIssuer(
+		*tokenSigningSecret,
+		"revtunnel",
+		"revtunnel-agent",
+		time.Hour,
+	)
+	if err != nil {
+		slog.Error("init token issuer", "err", err)
+		os.Exit(1)
+	}
+
 	reg := registry.New()
+	authHandler := &api.AuthHandler{
+		DB: db,
+		Tokens: issuer,
+	}
+	requireJWT := api.RequireJWT(issuer)
+
+	mux := http.NewServeMux()
+	mux.Handle("/auth/token", authHandler)
+	mux.Handle("/me", requireJWT(http.HandlerFunc(api.MeHandler)))
+	mux.Handle("/", &relay.Handler{Registry: reg})
 
 	go func() {
 		for range time.Tick(90 * time.Second) {
@@ -38,8 +78,7 @@ func main() {
 	go serveTunnel(*tunnelAddr, *certFile, *keyFile, *token, *domain, reg)
 
 	slog.Info("HTTP listener ready", "addr", *httpAddr)
-	h := &relay.Handler{Registry: reg}
-	if err := http.ListenAndServe(*httpAddr, h); err != nil {
+	if err := http.ListenAndServe(*httpAddr, mux); err != nil {
 		slog.Error("HTTP server", "err", err)
 		os.Exit(1)
 	}
