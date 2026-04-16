@@ -4,7 +4,7 @@ on:
   push:
     branches: -main
 
-jons:
+jos:
   test:
     name: Test
     runs-on: ubuntu-latest
