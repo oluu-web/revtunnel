@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -22,8 +21,6 @@ func main() {
 	tunnelAddr := flag.String("tunnel-addr", ":4443", "address agents connect to")
 	httpAddr   := flag.String("http-addr", ":8080", "address for public HTTP traffic")
 	domain     := flag.String("domain", "localhost", "base domain for hostnames")
-	certFile   := flag.String("cert", "server.crt", "TLS certificate file")
-	keyFile    := flag.String("key", "server.key", "TLS key file")
 	token      := flag.String("token", "secret123", "shared API token")
 	flag.Parse()
 
@@ -35,7 +32,7 @@ func main() {
 		}
 	}()
 
-	go serveTunnel(*tunnelAddr, *certFile, *keyFile, *token, *domain, reg)
+	go serveTunnel(*tunnelAddr, *token, *domain, reg)
 
 	slog.Info("HTTP listener ready", "addr", *httpAddr)
 	h := &relay.Handler{Registry: reg}
@@ -47,16 +44,8 @@ func main() {
 
 // Starts the TLS listener the agents connect to
 
-func serveTunnel(addr, certFile, keyFile, token, domain string, reg *registry.Registry) {
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		slog.Error("load TLS cert", "err", err)
-		os.Exit(1)
-	}
-
-	ln, err := tls.Listen("tcp", addr, &tls.Config{
-		Certificates: []tls.Certificate{cert},
-	})
+func serveTunnel(addr, token, domain string, reg *registry.Registry) {
+	ln, err := net.Listen("tcp", addr) // Caddy handles TLS
 	if err != nil {
 		slog.Error("tunnel listen", "err", err)
 		os.Exit(1)
