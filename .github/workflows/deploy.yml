@@ -1,0 +1,60 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: -main
+
+jons:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Run tests
+        run: go test ./..
+
+  deploy:
+    name: Build % Deploy
+    runs-on: ubuntu-lates
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Build server binary
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o tunnel-server ./cmd/server
+
+      - name: Copy binary to VPS
+        uses: appleboy/scp-action@0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "tunnel-server"
+          target: "/tmp/"
+
+      - name: Restart systemd service
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            mv /tmp/tunnel-server /usr/local/bin/tunnel-server
+            chmod +x /usr/local/bin/tunnel-server
+            systemctl restart tunnel
+            systemctl is-active --quiet tunnel && echo "Service is running" || echo "Service failed to start"
