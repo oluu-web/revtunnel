@@ -1,12 +1,12 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"crypto/tls"
 	"database/sql"
 	"flag"
-	"fmt"
 	"log/slog"
-	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +20,7 @@ import (
 	"github.com/oluu-web/lennut/internal/proto"
 	"github.com/oluu-web/lennut/internal/registry"
 	"github.com/oluu-web/lennut/internal/relay"
+	"github.com/oluu-web/lennut/internal/utils"
 )
 
 func main() {
@@ -57,6 +58,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	tunnelHandler := api.TunnelHandler{
+		DB: db,
+		Domain: *domain,
+	}
+
 	reg := registry.New()
 	authHandler := &api.AuthHandler{
 		DB: db,
@@ -67,6 +73,18 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/auth/token", authHandler)
 	mux.Handle("/me", requireJWT(http.HandlerFunc(api.MeHandler)))
+	mux.Handle("/tunnels", requireJWT(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			tunnelHandler.ListTunnels(w, r)
+		case http.MethodPost:
+			tunnelHandler.CreateTunnel(w, r)
+		default:
+			utils.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	})))
+
+mux.Handle("/tunnels/", requireJWT(http.HandlerFunc(tunnelHandler.DeleteTunnel)))
 	mux.Handle("/", &relay.Handler{Registry: reg})
 
 	go func() {
@@ -75,7 +93,7 @@ func main() {
 		}
 	}()
 
-	go serveTunnel(*tunnelAddr, *certFile, *keyFile, *token, *domain, reg)
+	go serveTunnel(db, *tunnelAddr, *certFile, *keyFile, *token, *domain, reg)
 
 	slog.Info("HTTP listener ready", "addr", *httpAddr)
 	if err := http.ListenAndServe(*httpAddr, mux); err != nil {
@@ -86,7 +104,7 @@ func main() {
 
 // Starts the TLS listener the agents connect to
 
-func serveTunnel(addr, certFile, keyFile, token, domain string, reg *registry.Registry) {
+func serveTunnel(db *sql.DB, addr, certFile, keyFile, token, domain string, reg *registry.Registry) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		slog.Error("load TLS cert", "err", err)
@@ -109,11 +127,11 @@ func serveTunnel(addr, certFile, keyFile, token, domain string, reg *registry.Re
 			slog.Error("tunnel accept", "err", err)
 			continue
 		}
-		go handleAgent(conn, token, domain, reg)
+		go handleAgent(conn, db, token, domain, reg)
 	}
 }
 
-func handleAgent(conn net.Conn, token, domain string, reg *registry.Registry) {
+func handleAgent(conn net.Conn, db *sql.DB, token, domain string, reg *registry.Registry) {
 	defer conn.Close()
 
 	mux, err := yamux.Server(conn, yamux.DefaultConfig())
@@ -130,9 +148,9 @@ func handleAgent(conn net.Conn, token, domain string, reg *registry.Registry) {
 	}
 	defer ctrl.Close()
 
-	// Handshake
+	ctrlReader := bufio.NewReader(ctrl)
 
-	env, err := proto.Read(ctrl)
+	env, err := proto.Read(ctrlReader)
 	if err != nil || env.Type != proto.MsgHello {
 		slog.Warn("expected HELLO", "got", env.Type, "err", err)
 		return
@@ -145,13 +163,33 @@ func handleAgent(conn net.Conn, token, domain string, reg *registry.Registry) {
 	}
 
 	if hello.Token != token {
-		_ = proto.Write(ctrl, proto.MsgError, proto.ErrorMsg{Message: "Invalid token"})
+		_ = proto.Write(ctrl, proto.MsgError, proto.ErrorMsg{Message: "invalid token"})
 		slog.Warn("rejected agent: bad token", "remote", conn.RemoteAddr())
 		return
 	}
 
+	if err := hello.Validate(); err != nil {
+		_ = proto.Write(ctrl, proto.MsgError, proto.ErrorMsg{Message: err.Error()})
+		slog.Warn("rejected agent: invalid HELLO", "err", err, "remote", conn.RemoteAddr())
+		return
+	}
+
+	hostname, err := activateTunnel(context.Background(), db, hello.TunnelID)
+	if err != nil {
+		_ = proto.Write(ctrl, proto.MsgError, proto.ErrorMsg{Message: "failed to activate tunnel"})
+		slog.Error("activate tunnel", "tunnel_id", hello.TunnelID, "err", err)
+		return
+	}
+
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := markTunnelClosed(ctx, db, hello.TunnelID); err != nil {
+			slog.Error("mark tunnel closed", "tunnel_id", hello.TunnelID, "err", err)
+		}
+	}()
+
 	sessionID := uuid.NewString()
-	hostname := fmt.Sprintf("%s.%s", randomHex(8), domain)
 	now := time.Now()
 
 	entry := &registry.Entry{
@@ -163,7 +201,7 @@ func handleAgent(conn net.Conn, token, domain string, reg *registry.Registry) {
 	}
 
 	if err := reg.Add(entry); err != nil {
-		slog.Error("regsgtry add", "err", err)
+		slog.Error("registry add", "err", err)
 		_ = proto.Write(ctrl, proto.MsgError, proto.ErrorMsg{Message: err.Error()})
 		return
 	}
@@ -171,20 +209,22 @@ func handleAgent(conn net.Conn, token, domain string, reg *registry.Registry) {
 
 	if err := proto.Write(ctrl, proto.MsgHelloAck, proto.HelloAckMsg{
 		SessionID: sessionID,
-		Hostname: hostname,
+		Hostname:  hostname,
 	}); err != nil {
 		slog.Error("write HELLO_ACK", "err", err)
 		return
 	}
-	slog.Info("tunnel up", "hostname", hostname, "session", sessionID)
+
+	slog.Info("tunnel up", "hostname", hostname, "session", sessionID, "tunnel_id", hello.TunnelID)
 
 	var seq int64
 	for {
-		env, err := proto.Read(ctrl)
+		env, err := proto.Read(ctrlReader)
 		if err != nil {
 			slog.Info("tunnel down", "hostname", hostname, "err", err)
 			return
 		}
+
 		if env.Type == proto.MsgHeartbeat {
 			seq++
 			reg.Touch(sessionID)
@@ -193,11 +233,41 @@ func handleAgent(conn net.Conn, token, domain string, reg *registry.Registry) {
 	}
 }
 
-func randomHex(n int) string {
-	const chars = "abcdef0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = chars[rand.Intn(len(chars))]
+func activateTunnel(ctx context.Context, db *sql.DB, tunnelID string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	row := db.QueryRowContext(
+		ctx,
+		`
+		UPDATE tunnels
+		SET status = 'active'
+		WHERE id = $1
+		  AND status = 'pending'
+		RETURNING hostname
+		`,
+		tunnelID,
+	)
+
+	var hostname string
+	if err := row.Scan(&hostname); err != nil {
+		return "", err
 	}
-	return string(b)
+
+	return hostname, nil
+}
+
+func markTunnelClosed(ctx context.Context, db *sql.DB, tunnelID string) error {
+	_, err := db.ExecContext(
+		ctx,
+		`
+		UPDATE tunnels
+		SET status = 'closed',
+		    closed_at = now()
+		WHERE id = $1
+		  AND status IN ('pending', 'active')
+		`,
+		tunnelID,
+	)
+	return err
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/oluu-web/lennut/internal/apikeys"
 	"github.com/oluu-web/lennut/internal/auth"
+	"github.com/oluu-web/lennut/internal/utils"
 )
 
 type AuthHandler struct {
@@ -34,50 +35,50 @@ type apiKeyRow struct {
 
 func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		utils.WriteJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	var req authTokenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid JSON body")
+		utils.WriteJSONError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
 
 	prefix, err := apikeys.ParsePrefix(req.APIKey)
 	if err != nil {
-		writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+		utils.WriteJSONError(w, http.StatusUnauthorized, "invalid api key")
 		return
 	}
 
 	row, err := h.lookupAPIKey(r, prefix)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+			utils.WriteJSONError(w, http.StatusUnauthorized, "invalid api key")
 			return
 		}
-		writeJSONError(w, http.StatusInternalServerError, "internal server error")
+		utils.WriteJSONError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	if row.RevokedAt.Valid {
-		writeJSONError(w, http.StatusUnauthorized, "api key revoked")
+		utils.WriteJSONError(w, http.StatusUnauthorized, "api key revoked")
 		return
 	}
 
 	if !apikeys.Verify(req.APIKey, row.KeyHash) {
-		writeJSONError(w, http.StatusUnauthorized, "invalid api key")
+		utils.WriteJSONError(w, http.StatusUnauthorized, "invalid api key")
 		return
 	}
 
 	if err := h.touchAPIKey(r, row.ID); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "internal server error")
+		utils.WriteJSONError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
 	token, expiresAt, err := h.Tokens.Issue(row.UserID, row.ID)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to issue token")
+		utils.WriteJSONError(w, http.StatusInternalServerError, "failed to issue token")
 		return
 	}
 
@@ -86,7 +87,7 @@ func (h *AuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		TTLSeconds: int64(time.Until(expiresAt).Seconds()),
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	utils.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (h *AuthHandler) lookupAPIKey(r *http.Request, prefix string) (*apiKeyRow, error) {
@@ -118,16 +119,4 @@ func (h *AuthHandler) touchAPIKey(r *http.Request, apiKeyID string) error {
 		apiKeyID,
 	)
 	return err
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeJSONError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{
-		"error": message,
-	})
 }

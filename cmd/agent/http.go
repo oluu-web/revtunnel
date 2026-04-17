@@ -1,6 +1,8 @@
+// cmd/agent/http.go
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -22,10 +24,11 @@ var httpCmd = &cobra.Command{
 	Use:   "http <port>",
 	Short: "Expose a local HTTP port via a public tunnel",
 	Long: `Connects to the tunnel server and exposes your local
-		HTTP service on a public hostname.
-		Example:
-				tunnel http 3000
-				tunnel http 8080 --server tunnel.yourdomain.io:4443`,
+HTTP service on a public hostname.
+
+Example:
+  tunnel http 3000
+  tunnel http 8080 --server tunnel.yourdomain.io:4443`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		port, err := strconv.Atoi(args[0])
@@ -89,14 +92,21 @@ func connect(ctx context.Context, port int) error {
 	}
 	defer ctrl.Close()
 
+	// ctrlReader is created once and reused for all proto.Read calls on this
+	// control stream. Reusing the same bufio.Reader preserves the internal
+	// buffer between reads, which is required for correct framing.
+	ctrlReader := bufio.NewReader(ctrl)
+
+	// TODO (chunk 4): replace flagTunnelID with the tunnel_id returned by
+	// POST /v1/tunnels once the control-plane registration flow is wired in.
 	if err := proto.Write(ctrl, proto.MsgHello, proto.HelloMsg{
-		Token: flagToken,
-		LocalPort: port,
+		Token:    flagToken,
+		TunnelID: flagTunnelID,
 	}); err != nil {
-		return fmt.Errorf("send HELLO :%w", err)
+		return fmt.Errorf("send HELLO: %w", err)
 	}
 
-	env, err := proto.Read(ctrl)
+	env, err := proto.Read(ctrlReader)
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}
@@ -107,6 +117,7 @@ func connect(ctx context.Context, port int) error {
 		_ = proto.Decode(env, &e)
 		return fmt.Errorf("server rejected tunnel: %s", e.Message)
 	case proto.MsgHelloAck:
+		// expected — fall through to decode below
 	default:
 		return fmt.Errorf("unexpected message: %s", env.Type)
 	}
@@ -131,15 +142,15 @@ func connect(ctx context.Context, port int) error {
 	select {
 	case <-ctx.Done():
 		return nil
-	case err := <-heartbeatDone(ctrl):
+	case err := <-heartbeatDone(ctrl, ctrlReader):
 		return err
 	}
 }
 
-func heartbeatDone(ctrl net.Conn) <-chan error {
+func heartbeatDone(ctrl net.Conn, r *bufio.Reader) <-chan error {
 	ch := make(chan error, 1)
 	go func() {
-					ch <- heartbeat(ctrl)
+		ch <- heartbeat(ctrl, r)
 	}()
 	return ch
 }
@@ -175,13 +186,16 @@ func proxyToLocal(stream net.Conn, localAddr string) {
 		done <- struct{}{}
 	}()
 	go func() {
-		io.Copy(stream, local) 
+		io.Copy(stream, local)
 		done <- struct{}{}
 	}()
 	<-done
 }
 
-func heartbeat(ctrl net.Conn) error {
+// heartbeat sends a ping every 30 seconds and waits for the server's echo.
+// It takes the same ctrlReader used for the handshake so the bufio buffer is
+// shared and no bytes are lost between the HELLO_ACK and the first heartbeat.
+func heartbeat(ctrl net.Conn, r *bufio.Reader) error {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	var seq int64
@@ -190,7 +204,7 @@ func heartbeat(ctrl net.Conn) error {
 		if err := proto.Write(ctrl, proto.MsgHeartbeat, proto.HeartbeatMsg{Seq: seq}); err != nil {
 			return fmt.Errorf("heartbeat send: %w", err)
 		}
-		env, err := proto.Read(ctrl)
+		env, err := proto.Read(r)
 		if err != nil {
 			return fmt.Errorf("heartbeat recv: %w", err)
 		}

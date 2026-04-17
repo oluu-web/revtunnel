@@ -13,6 +13,7 @@ import (
 type config struct {
 	Server string `yaml:"server"`
 	Token  string `yaml:"token"`
+	TunnelID string `yaml:"tunnel_id"`
 }
 
 var cfg config
@@ -21,12 +22,13 @@ var (
 	flagServer   string
 	flagToken    string
 	flagInsecure bool
+	flagTunnelID string
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "lennut",
+	Use:   "revtunel",
 	Short: "Expose a local port to the internet",
-	Long: `lennut is a reverse tunnelling tool.
+	Long: `revtunnel is a reverse tunnelling tool.
 It connects your local service to a public hostname
 via a persistent TLS tunnel.`,
 
@@ -53,6 +55,8 @@ Falls back to config file`)
 
 	rootCmd.PersistentFlags().BoolVar(&flagInsecure, "insecure", false,
 		"skip TLS certificate verification (local dev only)")
+
+		rootCmd.PersistentFlags().StringVar(&flagTunnelID, "tunnel-id", "", "tunnel ID from POST /tunnels")
 }
 
 func loadConfig(cmd *cobra.Command) error {
@@ -80,6 +84,10 @@ func loadConfig(cmd *cobra.Command) error {
 	}
 	if !cmd.Flags().Changed("token") && flagToken == "" {
 		flagToken = cfg.Token
+	}
+
+	if !cmd.Flags().Changed("token") && flagTunnelID == "" {
+		flagTunnelID = cfg.TunnelID
 	}
 
 	return nil
