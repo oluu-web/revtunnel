@@ -1,12 +1,17 @@
+// cmd/agent/http.go
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -22,10 +27,11 @@ var httpCmd = &cobra.Command{
 	Use:   "http <port>",
 	Short: "Expose a local HTTP port via a public tunnel",
 	Long: `Connects to the tunnel server and exposes your local
-		HTTP service on a public hostname.
-		Example:
-				tunnel http 3000
-				tunnel http 8080 --server tunnel.yourdomain.io:4443`,
+HTTP service on a public hostname.
+
+Example:
+  tunnel http 3000
+  tunnel http 8080 --server tunnel.yourdomain.io:4443`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		port, err := strconv.Atoi(args[0])
@@ -34,7 +40,7 @@ var httpCmd = &cobra.Command{
 		}
 		if flagToken == "" {
 			return fmt.Errorf(
-				"no token provided — run `tunnel config set-token <token>` or pass --token",
+				"not logged in — run `tunnel login --api-key <key>` first",
 			)
 		}
 		return runHTTP(port)
@@ -67,6 +73,11 @@ func runHTTP(port int) error {
 }
 
 func connect(ctx context.Context, port int) error {
+	tunnelID, hostname, err := registerTunnel(ctx, port)
+	if err != nil {
+		return fmt.Errorf("register tunnel: %w", err)
+	}
+
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: flagInsecure,
 	}
@@ -89,14 +100,16 @@ func connect(ctx context.Context, port int) error {
 	}
 	defer ctrl.Close()
 
+	ctrlReader := bufio.NewReader(ctrl)
+
 	if err := proto.Write(ctrl, proto.MsgHello, proto.HelloMsg{
-		Token: flagToken,
-		LocalPort: port,
+		Token:    flagToken,
+		TunnelID: tunnelID,
 	}); err != nil {
-		return fmt.Errorf("send HELLO :%w", err)
+		return fmt.Errorf("send HELLO: %w", err)
 	}
 
-	env, err := proto.Read(ctrl)
+	env, err := proto.Read(ctrlReader)
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
 	}
@@ -107,6 +120,7 @@ func connect(ctx context.Context, port int) error {
 		_ = proto.Decode(env, &e)
 		return fmt.Errorf("server rejected tunnel: %s", e.Message)
 	case proto.MsgHelloAck:
+		// expected — fall through to decode below
 	default:
 		return fmt.Errorf("unexpected message: %s", env.Type)
 	}
@@ -115,6 +129,8 @@ func connect(ctx context.Context, port int) error {
 	if err := proto.Decode(env, &ack); err != nil {
 		return fmt.Errorf("decode HELLO_ACK: %w", err)
 	}
+
+	_ = hostname
 
 	fmt.Printf("\n")
 	fmt.Printf("  tunnel active\n")
@@ -131,15 +147,81 @@ func connect(ctx context.Context, port int) error {
 	select {
 	case <-ctx.Done():
 		return nil
-	case err := <-heartbeatDone(ctrl):
+	case err := <-heartbeatDone(ctrl, ctrlReader):
 		return err
 	}
 }
 
-func heartbeatDone(ctrl net.Conn) <-chan error {
+func registerTunnel(ctx context.Context, port int) (tunnelID, hostname string, err error) {
+	httpBase := controlPlaneBase(flagServer)
+	body, err := json.Marshal(map[string]any{"target_port": port})
+	if err != nil {
+		return "", "", fmt.Errorf("marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		httpBase+"/tunnels",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+flagToken)
+
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: flagInsecure,
+			},
+		},
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ID       string `json:"id"`
+		Hostname string `json:"hostname"`
+		Error    string `json:"error"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", fmt.Errorf("decode response: %w", err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		// success
+	case http.StatusUnauthorized:
+		slog.Debug("token expired, attempting silent refresh")
+		if err := refreshToken(); err != nil {
+			return "", "", err
+		}
+		return registerTunnel(ctx, port)
+	case http.StatusConflict:
+		return "", "", fmt.Errorf("tunnel limit reached — delete an existing tunnel first")
+	default:
+		return "", "", fmt.Errorf("control plane error (%d): %s", resp.StatusCode, result.Error)
+	}
+
+	if result.ID == "" {
+		return "", "", fmt.Errorf("control plane returned empty tunnel id")
+	}
+
+	return result.ID, result.Hostname, nil
+}
+
+func heartbeatDone(ctrl net.Conn, r *bufio.Reader) <-chan error {
 	ch := make(chan error, 1)
 	go func() {
-					ch <- heartbeat(ctrl)
+		ch <- heartbeat(ctrl, r)
 	}()
 	return ch
 }
@@ -175,13 +257,16 @@ func proxyToLocal(stream net.Conn, localAddr string) {
 		done <- struct{}{}
 	}()
 	go func() {
-		io.Copy(stream, local) 
+		io.Copy(stream, local)
 		done <- struct{}{}
 	}()
 	<-done
 }
 
-func heartbeat(ctrl net.Conn) error {
+// heartbeat sends a ping every 30 seconds and waits for the server's echo.
+// It takes the same ctrlReader used for the handshake so the bufio buffer is
+// shared and no bytes are lost between the HELLO_ACK and the first heartbeat.
+func heartbeat(ctrl net.Conn, r *bufio.Reader) error {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	var seq int64
@@ -190,7 +275,7 @@ func heartbeat(ctrl net.Conn) error {
 		if err := proto.Write(ctrl, proto.MsgHeartbeat, proto.HeartbeatMsg{Seq: seq}); err != nil {
 			return fmt.Errorf("heartbeat send: %w", err)
 		}
-		env, err := proto.Read(ctrl)
+		env, err := proto.Read(r)
 		if err != nil {
 			return fmt.Errorf("heartbeat recv: %w", err)
 		}

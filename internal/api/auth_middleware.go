@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/oluu-web/lennut/internal/auth"
+	"github.com/oluu-web/lennut/internal/utils"
 )
 
 type contextKey struct {
@@ -19,13 +20,13 @@ func RequireJWT(tokens *auth.TokenIssuer) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tokenString, ok := bearerToken(r.Header.Get("Authorization"))
 			if !ok {
-				writeJSONError(w, http.StatusUnauthorized, "missing bearer token")
+				utils.WriteJSONError(w, http.StatusUnauthorized, "missing bearer token")
 				return
 			}
 
 			claims, err := tokens.Parse(tokenString)
 			if err != nil {
-				writeJSONError(w, http.StatusUnauthorized, "invalid token")
+				utils.WriteJSONError(w, http.StatusUnauthorized, "invalid token")
 				return
 			}
 

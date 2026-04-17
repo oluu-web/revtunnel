@@ -1,6 +1,8 @@
+// internal/proto/proto_test.go
 package proto_test
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"strings"
@@ -13,7 +15,7 @@ import (
 
 func TestWriteRead_Hello(t *testing.T) {
 	var buf bytes.Buffer
-	msg := proto.HelloMsg{Token: "secret123", LocalPort: 3000}
+	msg := proto.HelloMsg{Token: "secret123", TunnelID: "tunnel-uuid-001"}
 
 	if err := proto.Write(&buf, proto.MsgHello, msg); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -34,8 +36,8 @@ func TestWriteRead_Hello(t *testing.T) {
 	if got.Token != msg.Token {
 		t.Errorf("Token: want %q, got %q", msg.Token, got.Token)
 	}
-	if got.LocalPort != msg.LocalPort {
-		t.Errorf("LocalPort: want %d, got %d", msg.LocalPort, got.LocalPort)
+	if got.TunnelID != msg.TunnelID {
+		t.Errorf("TunnelID: want %q, got %q", msg.TunnelID, got.TunnelID)
 	}
 }
 
@@ -90,18 +92,48 @@ func TestWriteRead_Error(t *testing.T) {
 	}
 }
 
+// --- HelloMsg.Validate ---
+
+func TestHelloMsg_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		msg     proto.HelloMsg
+		wantErr bool
+	}{
+		{"valid", proto.HelloMsg{Token: "tok", TunnelID: "tid"}, false},
+		{"missing token", proto.HelloMsg{TunnelID: "tid"}, true},
+		{"missing tunnel_id", proto.HelloMsg{Token: "tok"}, true},
+		{"both empty", proto.HelloMsg{}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.msg.Validate()
+			if tc.wantErr && err == nil {
+				t.Error("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // --- Multiple messages on the same stream ---
 
 func TestWriteRead_MultipleMessages(t *testing.T) {
 	var buf bytes.Buffer
 
-	proto.Write(&buf, proto.MsgHello, proto.HelloMsg{Token: "t", LocalPort: 80})
+	proto.Write(&buf, proto.MsgHello, proto.HelloMsg{Token: "t", TunnelID: "tid-1"})
 	proto.Write(&buf, proto.MsgHeartbeat, proto.HeartbeatMsg{Seq: 1})
 	proto.Write(&buf, proto.MsgHeartbeat, proto.HeartbeatMsg{Seq: 2})
 
+	// A single bufio.Reader must be reused across all reads so the internal
+	// buffer is preserved between calls — matching how handleAgent uses proto.Read.
+	r := bufio.NewReader(&buf)
+
 	types := []proto.MsgType{proto.MsgHello, proto.MsgHeartbeat, proto.MsgHeartbeat}
 	for _, want := range types {
-		env, err := proto.Read(&buf)
+		env, err := proto.Read(r)
 		if err != nil {
 			t.Fatalf("Read: %v", err)
 		}
@@ -115,7 +147,7 @@ func TestWriteRead_MultipleMessages(t *testing.T) {
 
 func TestWrite_ProducesOneJSONLine(t *testing.T) {
 	var buf bytes.Buffer
-	proto.Write(&buf, proto.MsgHello, proto.HelloMsg{Token: "x", LocalPort: 1})
+	proto.Write(&buf, proto.MsgHello, proto.HelloMsg{Token: "x", TunnelID: "tid-x"})
 
 	line := buf.String()
 	newlines := strings.Count(line, "\n")
@@ -152,10 +184,10 @@ func TestWrite_WriterError(t *testing.T) {
 
 func TestDecode_InvalidTarget(t *testing.T) {
 	var buf bytes.Buffer
-	proto.Write(&buf, proto.MsgHello, proto.HelloMsg{Token: "t", LocalPort: 1})
+	proto.Write(&buf, proto.MsgHello, proto.HelloMsg{Token: "t", TunnelID: "tid-1"})
 	env, _ := proto.Read(&buf)
 
-	// Decode into a type that doesn't match (string vs struct) — should error
+	// Decode into a type that doesn't match (int vs struct) — should error
 	var bad int
 	if err := proto.Decode(env, &bad); err == nil {
 		t.Error("expected Decode error on type mismatch, got nil")

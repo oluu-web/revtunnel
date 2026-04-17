@@ -9,20 +9,19 @@ import (
 )
 
 var configCmd = &cobra.Command{
-	Use: "config",
+	Use:   "config",
 	Short: "Manage tunnel configuration",
 }
 
 var setTokenCmd = &cobra.Command{
-	Use: "set-token <token>",
-	Short: "Save an API token to the config file",
+	Use:   "set-token <token>",
+	Short: "Manually save a token (use `tunnel login` instead)",
 	Long: `Saves your API token to ~/.tunnel/config.yaml.
-		After running this once, you never need to pass --token again.
-		Example: tunnel config set-token secret123`,
+After running this once, you never need to pass --token again.
+Example: tunnel config set-token secret123`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		token := args[0]
-		return writeToken(token)
+		return writeToken(args[0])
 	},
 }
 
@@ -30,15 +29,15 @@ var setServerCmd = &cobra.Command{
 	Use:   "set-server <address>",
 	Short: "Save the tunnel server address to the config file",
 	Long: `Saves the tunnel server address to ~/.tunnel/config.yaml.
-		After running this once, you never need to pass --server again.
-		Example:
-  	tunnel config set-server tunnel.yourdomain.io:4443`,
+After running this once, you never need to pass --server again.
+Example:
+  tunnel config set-server tunnel.yourdomain.io:4443`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		server := args[0]
-		return writeServer(server)
+		return writeServer(args[0])
 	},
 }
+
 
 func init() {
 	configCmd.AddCommand(setTokenCmd)
@@ -88,4 +87,10 @@ func updateConfig(fn func(*config)) error {
 
 	fmt.Printf("config saved → %s\n", path)
 	return nil
+}
+
+func writeAPIKey(key string) error {
+    return updateConfig(func(c *config) {
+        c.APIKey = key
+    })
 }
