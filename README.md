@@ -1,6 +1,6 @@
 # RevTunnel
 
-RevTunnel exposes a local HTTP port to the public internet via a persistent TLS tunnel. It relays traffic only — your code runs entirely on your local machine.
+RevTunnel exposes a local HTTP port to the public internet via a persistent TLS tunnel. It relays traffic only; your code runs entirely on your local machine.
 
 ---
 
@@ -73,7 +73,7 @@ Exposes a local port to the internet.
 tunnel http 3000
 ```
 
-Internally this:
+Internally, this:
 
 1. Registers the tunnel via `POST /v1/tunnels`
 2. Dials the relay and sends a `HELLO` message with your JWT and tunnel ID
