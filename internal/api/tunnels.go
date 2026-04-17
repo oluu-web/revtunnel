@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -92,8 +93,9 @@ func (h *TunnelHandler) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		case errTunnelLimitReached:
 			utils.WriteJSONError(w, http.StatusConflict, "active tunnel limit reached")
 		case errDuplicatePort:
-			utils.WriteJSONError(w, http.StatusConflict, "tunnel already exists for this port")
+			utils.WriteJSONError(w, http.StatusUnprocessableEntity, "tunnel already exists for this port")
 		default:
+			slog.Error("create tunnel", "err", err)
 			utils.WriteJSONError(w, http.StatusInternalServerError, "failed to create tunnel")
 		}
 		return

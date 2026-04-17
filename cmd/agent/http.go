@@ -132,11 +132,8 @@ func connect(ctx context.Context, port int) error {
 
 	_ = hostname
 
-	fmt.Printf("\n")
-	fmt.Printf("  tunnel active\n")
-	fmt.Printf("  %-12s %s\n", "hostname:", ack.Hostname)
-	fmt.Printf("  %-12s localhost:%d\n", "forwarding:", port)
-	fmt.Printf("  %-12s %s\n", "server:", flagServer)
+	fmt.Printf("  Tunnel active\n")
+	fmt.Printf("  Forwarding localhost:%d at https://%s", port, ack.Hostname)
 	fmt.Printf("\n")
 	fmt.Printf("  press Ctrl+C to stop\n\n")
 
@@ -207,6 +204,8 @@ func registerTunnel(ctx context.Context, port int) (tunnelID, hostname string, e
 		return registerTunnel(ctx, port)
 	case http.StatusConflict:
 		return "", "", fmt.Errorf("tunnel limit reached — delete an existing tunnel first")
+	case http.StatusUnprocessableEntity:
+		return "", "", fmt.Errorf("a tunnel for port %d already exists", port)
 	default:
 		return "", "", fmt.Errorf("control plane error (%d): %s", resp.StatusCode, result.Error)
 	}
