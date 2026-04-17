@@ -3,12 +3,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -37,7 +40,7 @@ Example:
 		}
 		if flagToken == "" {
 			return fmt.Errorf(
-				"no token provided — run `tunnel config set-token <token>` or pass --token",
+				"not logged in — run `tunnel login --api-key <key>` first",
 			)
 		}
 		return runHTTP(port)
@@ -70,6 +73,11 @@ func runHTTP(port int) error {
 }
 
 func connect(ctx context.Context, port int) error {
+	tunnelID, hostname, err := registerTunnel(ctx, port)
+	if err != nil {
+		return fmt.Errorf("register tunnel: %w", err)
+	}
+
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: flagInsecure,
 	}
@@ -92,16 +100,11 @@ func connect(ctx context.Context, port int) error {
 	}
 	defer ctrl.Close()
 
-	// ctrlReader is created once and reused for all proto.Read calls on this
-	// control stream. Reusing the same bufio.Reader preserves the internal
-	// buffer between reads, which is required for correct framing.
 	ctrlReader := bufio.NewReader(ctrl)
 
-	// TODO (chunk 4): replace flagTunnelID with the tunnel_id returned by
-	// POST /v1/tunnels once the control-plane registration flow is wired in.
 	if err := proto.Write(ctrl, proto.MsgHello, proto.HelloMsg{
 		Token:    flagToken,
-		TunnelID: flagTunnelID,
+		TunnelID: tunnelID,
 	}); err != nil {
 		return fmt.Errorf("send HELLO: %w", err)
 	}
@@ -127,6 +130,8 @@ func connect(ctx context.Context, port int) error {
 		return fmt.Errorf("decode HELLO_ACK: %w", err)
 	}
 
+	_ = hostname
+
 	fmt.Printf("\n")
 	fmt.Printf("  tunnel active\n")
 	fmt.Printf("  %-12s %s\n", "hostname:", ack.Hostname)
@@ -145,6 +150,72 @@ func connect(ctx context.Context, port int) error {
 	case err := <-heartbeatDone(ctrl, ctrlReader):
 		return err
 	}
+}
+
+func registerTunnel(ctx context.Context, port int) (tunnelID, hostname string, err error) {
+	httpBase := controlPlaneBase(flagServer)
+	body, err := json.Marshal(map[string]any{"target_port": port})
+	if err != nil {
+		return "", "", fmt.Errorf("marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		httpBase+"/tunnels",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+flagToken)
+
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: flagInsecure,
+			},
+		},
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		ID       string `json:"id"`
+		Hostname string `json:"hostname"`
+		Error    string `json:"error"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", "", fmt.Errorf("decode response: %w", err)
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		// success
+	case http.StatusUnauthorized:
+		slog.Debug("token expired, attempting silent refresh")
+		if err := refreshToken(); err != nil {
+			return "", "", err
+		}
+		return registerTunnel(ctx, port)
+	case http.StatusConflict:
+		return "", "", fmt.Errorf("tunnel limit reached — delete an existing tunnel first")
+	default:
+		return "", "", fmt.Errorf("control plane error (%d): %s", resp.StatusCode, result.Error)
+	}
+
+	if result.ID == "" {
+		return "", "", fmt.Errorf("control plane returned empty tunnel id")
+	}
+
+	return result.ID, result.Hostname, nil
 }
 
 func heartbeatDone(ctrl net.Conn, r *bufio.Reader) <-chan error {

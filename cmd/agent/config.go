@@ -1,4 +1,3 @@
-// cmd/agent/config.go
 package main
 
 import (
@@ -16,7 +15,7 @@ var configCmd = &cobra.Command{
 
 var setTokenCmd = &cobra.Command{
 	Use:   "set-token <token>",
-	Short: "Save an API token to the config file",
+	Short: "Manually save a token (use `tunnel login` instead)",
 	Long: `Saves your API token to ~/.tunnel/config.yaml.
 After running this once, you never need to pass --token again.
 Example: tunnel config set-token secret123`,
@@ -39,28 +38,10 @@ Example:
 	},
 }
 
-// setTunnelIDCmd persists the tunnel ID returned by POST /v1/tunnels.
-// This is a temporary helper used until chunk 4 wires up automatic
-// tunnel registration before the HELLO handshake.
-var setTunnelIDCmd = &cobra.Command{
-	Use:   "set-tunnel-id <id>",
-	Short: "Save a tunnel ID to the config file",
-	Long: `Saves a tunnel ID to ~/.tunnel/config.yaml.
-The tunnel ID is returned by the server when you register a tunnel
-via POST /v1/tunnels. This command is a temporary helper until
-tunnel registration is automated in the agent startup flow.
-Example:
-  tunnel config set-tunnel-id 550e8400-e29b-41d4-a716-446655440000`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return writeTunnelID(args[0])
-	},
-}
 
 func init() {
 	configCmd.AddCommand(setTokenCmd)
 	configCmd.AddCommand(setServerCmd)
-	configCmd.AddCommand(setTunnelIDCmd)
 
 	rootCmd.AddCommand(configCmd)
 }
@@ -74,12 +55,6 @@ func writeToken(token string) error {
 func writeServer(server string) error {
 	return updateConfig(func(c *config) {
 		c.Server = server
-	})
-}
-
-func writeTunnelID(id string) error {
-	return updateConfig(func(c *config) {
-		c.TunnelID = id
 	})
 }
 
@@ -112,4 +87,10 @@ func updateConfig(fn func(*config)) error {
 
 	fmt.Printf("config saved → %s\n", path)
 	return nil
+}
+
+func writeAPIKey(key string) error {
+    return updateConfig(func(c *config) {
+        c.APIKey = key
+    })
 }

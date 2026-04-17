@@ -13,7 +13,7 @@ import (
 type config struct {
 	Server string `yaml:"server"`
 	Token  string `yaml:"token"`
-	TunnelID string `yaml:"tunnel_id"`
+	APIKey string `yaml:"api_key"`
 }
 
 var cfg config
@@ -21,12 +21,12 @@ var cfg config
 var (
 	flagServer   string
 	flagToken    string
+	flagAPIKey string
 	flagInsecure bool
-	flagTunnelID string
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "revtunel",
+	Use:   "revtunnel",
 	Short: "Expose a local port to the internet",
 	Long: `revtunnel is a reverse tunnelling tool.
 It connects your local service to a public hostname
@@ -50,13 +50,10 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&flagServer, "server", "", `tunnel server address (e.g. tunnel.yourdomain.io:4443) Fals back to config file then "localhost:4443"`)
 	rootCmd.PersistentFlags().StringVar(&flagToken, "token", "",
-		`API token for authentication
-Falls back to config file`)
-
+		`API token for authentication Falls back to config file`)
+	rootCmd.PersistentFlags().StringVar(&flagAPIKey, "api-key", "", "API key for silent token refresh")
 	rootCmd.PersistentFlags().BoolVar(&flagInsecure, "insecure", false,
 		"skip TLS certificate verification (local dev only)")
-
-		rootCmd.PersistentFlags().StringVar(&flagTunnelID, "tunnel-id", "", "tunnel ID from POST /tunnels")
 }
 
 func loadConfig(cmd *cobra.Command) error {
@@ -85,11 +82,9 @@ func loadConfig(cmd *cobra.Command) error {
 	if !cmd.Flags().Changed("token") && flagToken == "" {
 		flagToken = cfg.Token
 	}
-
-	if !cmd.Flags().Changed("token") && flagTunnelID == "" {
-		flagTunnelID = cfg.TunnelID
+	if !cmd.Flags().Changed("api_key") && flagAPIKey == "" {
+		flagAPIKey = cfg.APIKey
 	}
-
 	return nil
 }
 

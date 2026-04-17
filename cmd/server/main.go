@@ -29,7 +29,6 @@ func main() {
 	domain     := flag.String("domain", "localhost", "base domain for hostnames")
 	certFile   := flag.String("cert", "server.crt", "TLS certificate file")
 	keyFile    := flag.String("key", "server.key", "TLS key file")
-	token      := flag.String("token", "secret123", "shared API token")
 	databaseURL := flag.String("database-url", "", "PostgreSQL connection string")
 	tokenSigningSecret := flag.String("token-signing-secret", "", "secret used to sign auth tokens")
 	flag.Parse()
@@ -93,7 +92,7 @@ mux.Handle("/tunnels/", requireJWT(http.HandlerFunc(tunnelHandler.DeleteTunnel))
 		}
 	}()
 
-	go serveTunnel(db, *tunnelAddr, *certFile, *keyFile, *token, *domain, reg)
+	go serveTunnel(db, *tunnelAddr, *certFile, *keyFile, issuer, *domain, reg)
 
 	slog.Info("HTTP listener ready", "addr", *httpAddr)
 	if err := http.ListenAndServe(*httpAddr, mux); err != nil {
@@ -104,7 +103,7 @@ mux.Handle("/tunnels/", requireJWT(http.HandlerFunc(tunnelHandler.DeleteTunnel))
 
 // Starts the TLS listener the agents connect to
 
-func serveTunnel(db *sql.DB, addr, certFile, keyFile, token, domain string, reg *registry.Registry) {
+func serveTunnel(db *sql.DB, addr, certFile, keyFile string, issuer *auth.TokenIssuer, domain string, reg *registry.Registry) {
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		slog.Error("load TLS cert", "err", err)
@@ -127,11 +126,11 @@ func serveTunnel(db *sql.DB, addr, certFile, keyFile, token, domain string, reg 
 			slog.Error("tunnel accept", "err", err)
 			continue
 		}
-		go handleAgent(conn, db, token, domain, reg)
+		go handleAgent(conn, db, issuer, domain, reg)
 	}
 }
 
-func handleAgent(conn net.Conn, db *sql.DB, token, domain string, reg *registry.Registry) {
+func handleAgent(conn net.Conn, db *sql.DB, issuer *auth.TokenIssuer, domain string, reg *registry.Registry) {
 	defer conn.Close()
 
 	mux, err := yamux.Server(conn, yamux.DefaultConfig())
@@ -162,15 +161,16 @@ func handleAgent(conn net.Conn, db *sql.DB, token, domain string, reg *registry.
 		return
 	}
 
-	if hello.Token != token {
-		_ = proto.Write(ctrl, proto.MsgError, proto.ErrorMsg{Message: "invalid token"})
-		slog.Warn("rejected agent: bad token", "remote", conn.RemoteAddr())
-		return
-	}
-
 	if err := hello.Validate(); err != nil {
 		_ = proto.Write(ctrl, proto.MsgError, proto.ErrorMsg{Message: err.Error()})
 		slog.Warn("rejected agent: invalid HELLO", "err", err, "remote", conn.RemoteAddr())
+		return
+	}
+
+	claims, err := issuer.Parse(hello.Token)
+	if err != nil {
+		_ = proto.Write(ctrl, proto.MsgError, proto.ErrorMsg{Message: "invalid token"})
+		slog.Warn("rejected agent: bad token", "remote", conn.RemoteAddr(), "err", err)
 		return
 	}
 
@@ -215,7 +215,7 @@ func handleAgent(conn net.Conn, db *sql.DB, token, domain string, reg *registry.
 		return
 	}
 
-	slog.Info("tunnel up", "hostname", hostname, "session", sessionID, "tunnel_id", hello.TunnelID)
+	slog.Info("tunnel up", "hostname", hostname, "session", sessionID, "tunnel_id", hello.TunnelID, "user_id", claims.UserID,)
 
 	var seq int64
 	for {

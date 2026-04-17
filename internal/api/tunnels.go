@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,11 @@ type tunnelResponse struct {
 	Status     string    `json:"status"`
 	CreatedAt  time.Time `json:"created_at"`
 }
+
+var (
+	errTunnelLimitReached = fmt.Errorf("tunnel limit reached")
+	errDuplicatePort      = fmt.Errorf("duplicate port")
+)
 
 func (h *TunnelHandler) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -78,26 +84,18 @@ func (h *TunnelHandler) CreateTunnel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeCount, err := h.countActiveTunnels(r, claims.UserID)
-	if err != nil {
-		utils.WriteJSONError(w, http.StatusInternalServerError, "internal server error")
-		return
-	}
-
-	if activeCount >= 2 {
-		utils.WriteJSONError(w, http.StatusConflict, "active tunnel limit reached")
-		return
-	}
-
 	hostname := fmt.Sprintf("%s.%s", uuid.NewString()[:8], h.Domain)
 
-	tunnel, err := h.insertTunnel(r, claims.UserID, hostname, req.Protocol, req.TargetPort)
+	tunnel, err := h.createTunnelTx(r.Context(), claims.UserID, hostname, req.Protocol, req.TargetPort)
 	if err != nil {
-		if isDuplicateTunnelPort(err) {
+		switch err {
+		case errTunnelLimitReached:
+			utils.WriteJSONError(w, http.StatusConflict, "active tunnel limit reached")
+		case errDuplicatePort:
 			utils.WriteJSONError(w, http.StatusConflict, "tunnel already exists for this port")
-			return
+		default:
+			utils.WriteJSONError(w, http.StatusInternalServerError, "failed to create tunnel")
 		}
-		utils.WriteJSONError(w, http.StatusInternalServerError, "failed to create tunnel")
 		return
 	}
 
@@ -155,56 +153,57 @@ func (h *TunnelHandler) DeleteTunnel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *TunnelHandler) countActiveTunnels(r *http.Request, userID string) (int, error) {
-	var count int
+func (h *TunnelHandler) createTunnelTx(ctx context.Context, userID, hostname, protocol string, targetPort int) (*tunnelResponse, error) {
+	tx, err := h.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
 
-	err := h.DB.QueryRowContext(
-		r.Context(),
-		`
-		SELECT COUNT(*)
-		FROM tunnels
-		WHERE user_id = $1
-		  AND status IN ('pending', 'active')
-		`,
-		userID,
-	).Scan(&count)
-
-	return count, err
-}
-
-func (h *TunnelHandler) insertTunnel(r *http.Request, userID, hostname, protocol string, targetPort int) (*tunnelResponse, error) {
-	row := h.DB.QueryRowContext(
-		r.Context(),
-		`
-		INSERT INTO tunnels (
-			user_id,
-			hostname,
-			protocol,
-			target_port,
-			status
-		)
-		VALUES ($1, $2, $3, $4, 'pending')
-		RETURNING id, hostname, protocol, target_port, status, created_at
-		`,
-		userID,
-		hostname,
-		protocol,
-		targetPort,
-	)
-
-	var out tunnelResponse
-	if err := row.Scan(
-		&out.ID,
-		&out.Hostname,
-		&out.Protocol,
-		&out.TargetPort,
-		&out.Status,
-		&out.CreatedAt,
-	); err != nil {
-		return nil, err
+	_, err = tx.ExecContext(ctx, `SELECT id FROM users WHERE id = $1 FOR UPDATE`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("lock user row: %w", err)
 	}
 
-	return &out, nil
+	var count int
+	err = tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tunnels WHERE user_id = $1 AND status IN ('pending', 'active')`,
+		userID,
+	).Scan(&count)
+	if err != nil {
+		return nil, fmt.Errorf("count tunnels: %w", err)
+	}
+
+	if count >= 2 {
+		return nil, errTunnelLimitReached
+	}
+
+	var tunnel tunnelResponse
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO tunnels (user_id, hostname, protocol, target_port, status)
+		VALUES ($1, $2, $3, $4, 'pending')
+		RETURNING id, user_id, hostname, protocol, target_port, status, created_at`,
+		userID, hostname, protocol, targetPort,
+	).Scan(
+		&tunnel.ID,
+		&tunnel.Hostname,
+		&tunnel.Protocol,
+		&tunnel.TargetPort,
+		&tunnel.Status,
+		&tunnel.CreatedAt,
+	)
+
+	if err != nil {
+		if isDuplicateTunnelPort(err) {
+			return nil, errDuplicatePort
+		}
+		return nil, fmt.Errorf("insert tunnel: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+
+	return &tunnel, nil
 }
 
 func (h *TunnelHandler) listTunnels(r *http.Request, userID string) ([]tunnelResponse, error) {
