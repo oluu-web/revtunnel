@@ -39,10 +39,8 @@ You'll see output like:
 ```
 tunnel active
   url         https://abc123.revtunnel.xyz
-  forwarding  localhost:3000
-  server      agent.revtunnel.xyz:4443
-
-press Ctrl+C to stop
+  Forwarding localhost:3000 at https://abc.revtunnel.xyz
+  press Ctrl+C to stop
 ```
 
 To expose multiple ports, run the agent in separate terminals — each gets its own public URL.
